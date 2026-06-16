@@ -233,19 +233,32 @@ function initQuagga(){if(quagStarted)return;setStat('Starting camera…','idle')
 function stopScanner(){if(quagStarted){try{Quagga.offDetected();Quagga.stop();}catch{}quagStarted=false;}}
 function onBarcode(data){if(scanLocked)return;const code=data?.codeResult?.code;if(!code)return;scanLocked=true;setStat('Found '+code+' — looking up…','idle');fetchBarcode(code);}
 function setStat(msg,cls){const el=document.getElementById('sstat');el.textContent=msg;el.className='sstat '+cls;}
-// ── Barcode: Open Food Facts (works over HTTPS) ────────────────────────────
+// ── Barcode: try Open Food Facts → USDA by UPC ────────────────────────────
 async function fetchBarcode(code){
+  setStat('Looking up '+code+'…','idle');
+
+  // 1) Open Food Facts
   try{
     const r=await fetch('https://world.openfoodfacts.org/api/v0/product/'+code+'.json');
     const d=await r.json();
-    if(d.status!==1)throw new Error();
-    showFood(parseOFF(d.product));
-  }catch{
-    setStat('Not found — try searching by name','err');
-    scanLocked=false;
-  }
+    if(d.status===1&&d.product&&d.product.product_name){showFood(parseOFF(d.product));return;}
+  }catch{}
+
+  // 2) USDA by UPC
+  try{
+    const r=await fetch('https://api.nal.usda.gov/fdc/v1/foods/search?query='+code+'&api_key=DEMO_KEY&pageSize=5');
+    const d=await r.json();
+    const foods=d.foods||[];
+    const match=foods.find(f=>f.gtinUpc===code||String(f.gtinUpc).replace(/^0+/,'')=== code.replace(/^0+/,''))||foods[0];
+    if(match&&match.description){showFood(parseUSDA(match));return;}
+  }catch{}
+
+  setStat('Product not found — try Search tab','err');
+  scanLocked=false;
 }
+
 function parseOFF(p){const n=p.nutriments||{},per100=k=>Math.round((n[k+'_100g']||n[k]||0)*10)/10;return{name:p.product_name||'Unknown',brand:p.brands||'',kcal100:Math.round(n['energy-kcal_100g']||(n['energy_100g']||0)/4.184||0),carbs100:per100('carbohydrates'),protein100:per100('proteins'),fat100:per100('fat')};}
+function parseUSDA(f){const nuts=f.foodNutrients||[];const get=id=>{const n=nuts.find(x=>x.nutrientId===id||x.nutrientNumber===String(id));return n?Math.round((n.value||0)*10)/10:0;};return{name:f.description||'Unknown',brand:f.brandOwner||f.brandName||'',kcal100:Math.round(get(1008)||get('208')||0),carbs100:get(1005)||get('205')||0,protein100:get(1003)||get('203')||0,fat100:get(1004)||get('204')||0};}
 
 // ── Search: USDA (5M+ foods) with offline fallback ─────────────────────────
 async function doSearch(){
@@ -261,16 +274,7 @@ async function doSearch(){
     const r=await fetch('https://api.nal.usda.gov/fdc/v1/foods/search?query='+encodeURIComponent(q)+'&pageSize=12&api_key=DEMO_KEY');
     if(!r.ok)throw new Error();
     const d=await r.json();
-    const items=(d.foods||[]).map(f=>{
-      const nuts=f.foodNutrients||[];
-      const get=id=>{ const n=nuts.find(x=>x.nutrientId===id||x.nutrientNumber===String(id)); return n?Math.round((n.value||0)*10)/10:0; };
-      // nutrient IDs: 1008=energy kcal, 1005=carbs, 1003=protein, 1004=fat
-      const kcal=get(1008)||get('208')||0;
-      const carbs=get(1005)||get('205')||0;
-      const protein=get(1003)||get('203')||0;
-      const fat=get(1004)||get('204')||0;
-      return{name:f.description||'Unknown',brand:f.brandOwner||f.brandName||f.dataType||'USDA',kcal100:Math.round(kcal),carbs100:carbs,protein100:protein,fat100:fat};
-    }).filter(x=>x.kcal100>0);
+    const items=(d.foods||[]).map(parseUSDA).filter(x=>x.kcal100>0);
 
     stat.innerHTML='';
     if(items.length){renderResults(items);return;}
