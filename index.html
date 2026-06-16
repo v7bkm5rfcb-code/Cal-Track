@@ -233,16 +233,56 @@ function initQuagga(){if(quagStarted)return;setStat('Starting camera…','idle')
 function stopScanner(){if(quagStarted){try{Quagga.offDetected();Quagga.stop();}catch{}quagStarted=false;}}
 function onBarcode(data){if(scanLocked)return;const code=data?.codeResult?.code;if(!code)return;scanLocked=true;setStat('Found '+code+' — looking up…','idle');fetchBarcode(code);}
 function setStat(msg,cls){const el=document.getElementById('sstat');el.textContent=msg;el.className='sstat '+cls;}
-async function fetchBarcode(code){try{const url='https://api.allorigins.win/get?url='+encodeURIComponent('https://world.openfoodfacts.org/api/v0/product/'+code+'.json');const r=await fetch(url);const w=await r.json();const d=JSON.parse(w.contents);if(d.status!==1)throw new Error();showFood(parseOFF(d.product));}catch{setStat('Not found — try searching by name','err');scanLocked=false;}}
+// ── Barcode: Open Food Facts (works over HTTPS) ────────────────────────────
+async function fetchBarcode(code){
+  try{
+    const r=await fetch('https://world.openfoodfacts.org/api/v0/product/'+code+'.json');
+    const d=await r.json();
+    if(d.status!==1)throw new Error();
+    showFood(parseOFF(d.product));
+  }catch{
+    setStat('Not found — try searching by name','err');
+    scanLocked=false;
+  }
+}
 function parseOFF(p){const n=p.nutriments||{},per100=k=>Math.round((n[k+'_100g']||n[k]||0)*10)/10;return{name:p.product_name||'Unknown',brand:p.brands||'',kcal100:Math.round(n['energy-kcal_100g']||(n['energy_100g']||0)/4.184||0),carbs100:per100('carbohydrates'),protein100:per100('proteins'),fat100:per100('fat')};}
-function doSearch(){
-  const q=document.getElementById('q-inp').value.trim().toLowerCase();
+
+// ── Search: USDA (5M+ foods) with offline fallback ─────────────────────────
+async function doSearch(){
+  const q=document.getElementById('q-inp').value.trim();
   if(!q)return;
-  document.getElementById('results').innerHTML='';
-  const words=q.split(/\s+/);
-  const scored=FOODS.map(f=>{const hay=(f.name+' '+f.brand).toLowerCase();let score=0;words.forEach(w=>{if(hay.includes(w))score+=w.length*2;if(f.name.toLowerCase().startsWith(w))score+=10;});return{...f,score};}).filter(f=>f.score>0).sort((a,b)=>b.score-a.score).slice(0,12);
-  if(!scored.length){document.getElementById('results').innerHTML='<div style="padding:16px 0;text-align:center;color:var(--muted);font-size:13px">No results — try "chicken", "rice", "banana"…</div>';return;}
-  renderResults(scored);
+  const res=document.getElementById('results');
+  const stat=document.getElementById('search-status');
+  res.innerHTML='';
+  stat.innerHTML='<div style="padding:10px 0;color:var(--muted);font-size:13px">🔍 Searching…</div>';
+
+  try{
+    // USDA FoodData Central — 5 million+ foods, free, no key needed for DEMO_KEY
+    const r=await fetch('https://api.nal.usda.gov/fdc/v1/foods/search?query='+encodeURIComponent(q)+'&pageSize=12&api_key=DEMO_KEY');
+    if(!r.ok)throw new Error();
+    const d=await r.json();
+    const items=(d.foods||[]).map(f=>{
+      const nuts=f.foodNutrients||[];
+      const get=id=>{ const n=nuts.find(x=>x.nutrientId===id||x.nutrientNumber===String(id)); return n?Math.round((n.value||0)*10)/10:0; };
+      // nutrient IDs: 1008=energy kcal, 1005=carbs, 1003=protein, 1004=fat
+      const kcal=get(1008)||get('208')||0;
+      const carbs=get(1005)||get('205')||0;
+      const protein=get(1003)||get('203')||0;
+      const fat=get(1004)||get('204')||0;
+      return{name:f.description||'Unknown',brand:f.brandOwner||f.brandName||f.dataType||'USDA',kcal100:Math.round(kcal),carbs100:carbs,protein100:protein,fat100:fat};
+    }).filter(x=>x.kcal100>0);
+
+    stat.innerHTML='';
+    if(items.length){renderResults(items);return;}
+    throw new Error('no results');
+  }catch{
+    // Fallback: offline database
+    stat.innerHTML='';
+    const ql=q.toLowerCase(),words=ql.split(/\s+/);
+    const scored=FOODS.map(f=>{const hay=(f.name+' '+f.brand).toLowerCase();let score=0;words.forEach(w=>{if(hay.includes(w))score+=w.length*2;if(f.name.toLowerCase().startsWith(w))score+=10;});return{...f,score};}).filter(f=>f.score>0).sort((a,b)=>b.score-a.score).slice(0,12);
+    if(scored.length){renderResults(scored);}
+    else{res.innerHTML='<div style="padding:16px 0;text-align:center;color:var(--muted);font-size:13px">No results found. Try a different term.</div>';}
+  }
 }
 function renderResults(items){let html='';items.forEach((item,i)=>{html+=`<div class="ri" onclick="pickResult(${i})"><div class="ri-info"><div class="ri-name">${esc(item.name)}</div><div class="ri-brand">${esc(item.brand)} · per 100g</div></div><div class="ri-kcal">${item.kcal100} kcal</div></div>`;});document.getElementById('results').innerHTML=html;document.getElementById('results')._items=items;}
 function pickResult(i){const items=document.getElementById('results')._items||[];if(items[i])showFood(items[i]);}
